@@ -1,0 +1,1 @@
+from tensegrity_env.envs.tensegrity_env import tensegrity_env

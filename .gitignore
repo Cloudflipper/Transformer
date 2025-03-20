@@ -1,0 +1,6 @@
+# /tr_env/tr_env.egg-info
+# /saved_data/*.npy
+# /tracking_saved_data/*.npy
+# /traj_saved_data/*.npy
+# tr_env/tr_env/__pycache__/
+# tr_env/tr_env/envs/__pycache__/
