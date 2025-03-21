@@ -5,6 +5,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset,TensorDataset
 import os
 import math
+import logging
 
 class DynamicPositionalEncoding(nn.Module):
     """
@@ -153,8 +154,12 @@ class OnlineTransformer(nn.Module):
             learning_rate (float): The learning rate for the optimizer.
             validation_split (float): The proportion of the dataset to include in the validation split.
         """
-        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        device = torch.device("cpu")
+        logging.basicConfig(filename=os.path.join(save_dir, 'training.log'),
+                            level=logging.INFO,
+                            format='%(asctime)s - %(levelname)s - %(message)s')
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #device = torch.device("cpu")
         self.to(device)
         priviledge_tensor = torch.tensor(priviledge[:16000], dtype=torch.float32).to(device)
         obs_with_noise_tensor = torch.tensor(obs_with_noise[:16000], dtype=torch.float32).to(device)
@@ -186,6 +191,7 @@ class OnlineTransformer(nn.Module):
                 train_loss += loss.item() * inputs.size(0)
 
             train_loss /= len(train_loader.dataset)
+            logging.info(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}")
             print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}")
 
             # Validation
@@ -199,6 +205,7 @@ class OnlineTransformer(nn.Module):
 
             val_loss /= len(val_loader.dataset)
             print(f"Epoch [{epoch+1}/{epochs}], Val Loss: {val_loss:.4f}")
+            logging.info(f"Epoch [{epoch+1}/{epochs}], Val Loss: {val_loss:.4f}")
             
             #save model every 100 steps
             if (epoch+1) % 100 == 0:
@@ -211,6 +218,7 @@ class OnlineTransformer(nn.Module):
                     'val_loss': val_loss
                 }, checkpoint_path)
                 print(f"Model checkpoint saved to {checkpoint_path}")
+                logging.info(f"Model checkpoint saved to {checkpoint_path}")
         
     
 # class DiffusionModel(nn.Module):
