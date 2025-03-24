@@ -132,46 +132,17 @@ class OnlineTransformer(nn.Module):
         Returns:
             torch.Tensor: The reconstructed output with shape (batch_size, input_dim).
         """
-        #print("x.shape",x.shape)
         res = self.pre_layer(x)
         res = self.positional_encoding(res).squeeze(0)# (batch_size, seq_length, d_model)
-        
-        #print("x.shape2",x.shape)
-        
-        #print("x.shape3",x.shape)
-        #input_seq = torch.cat([self.memory, x.unsqueeze(0)], dim=0)  # (memory_size + 1, batch_size, d_model)
         res = res.permute(1, 0, 2)
         
         feature = self.transformer_encoder(res)  # (seq_length, batch_size, d_model)
         self.feature = torch.cat((feature.permute(1, 0, 2),x),dim=2)
-        # if self.diffusion_model is not None:
-        #     encoder_output = encoder_output.permute(1, 0, 2)  # (batch_size, memory_size + 1, d_model)
-        #     encoder_output = self.diffusion_model(encoder_output) 
-        #     encoder_output = encoder_output.permute(1, 0, 2)
-        decoder_output = self.transformer_decoder(feature, feature)  # (seq_length, batch_size, d_model)
-        #print("decoder_output.shape",decoder_output.shape)
-        reconstructed = self.output_layer(decoder_output)  # (batch_size, input_dim)
+        decoder_output = self.transformer_decoder(feature, feature)  
+        reconstructed = self.output_layer(decoder_output)  
         reconstructed = reconstructed.permute(1, 0, 2)
-        #print("reconstructed.shape",reconstructed.shape)
         return reconstructed
 
-    # def update_memory(self, x):
-    #     """
-    #     Updates the memory buffer with the new input embedding.
-    #     Args:m
-    #         x (torch.Tensor): The new input embedding with shape (batch_size, d_model).
-    #     """
-    #     x = x.unsqueeze(0)  # (1, batch_size, d_model)
-    #     # print(self.memory.shape)
-    #     # print(x.shape)
-        
-    #     self.memory = torch.cat([self.memory[1:], x], dim=0)  # (memory_size, batch_size, d_model)
-        
-    # def clear_memory(self):
-    #     """
-    #     Resets the memory buffer to a tensor of zeros with the specified size.
-    #     """
-    #     self.memory = torch.zeros(self.memory_size, self.batch_size, self.d_model).to(self.device)
         
     def get_feature(self):
         return self.feature
@@ -194,7 +165,6 @@ class OnlineTransformer(nn.Module):
         
         device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
         self.device = device
-        #device = torch.device("cpu")
         self.to(device)
         priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
         obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
@@ -221,33 +191,15 @@ class OnlineTransformer(nn.Module):
         # Training loop
         for epoch in range(epochs):
             epoch_start_time = time.time()
-            #self.train(priviledge_tensor , obs_with_noise_tensor)
             train_loss = 0.0
             train_start_time = time.time()
             
             for batch_idx, (inputs, targets) in enumerate(train_loader):  # inputs (batch_size, trajectory, 49)
                 optimizer.zero_grad()
-                output_t = self(inputs)  # (batch_size, input_dim)
-                # print("output_t.shape",output_t.shape)
-                # print("targets.shape",targets.shape)
+                output_t = self(inputs)
                 total_loss = criterion(output_t, targets)
-                # for t in range(trajectory):
-                #     input_t = inputs[t]  
-                #     target_t = targets[t]  
-                #     # if input_t.shape[0]<self.memory.shape[0]:
-                #     #     input_t = torch.nn.functional.pad(input_t, 
-                #     #                 (0, 0, 0, self.memory.shape[1]-input_t.shape[0]), mode='constant', value=0)
-                #     #     target_t = torch.nn.functional.pad(target_t, 
-                #     #                 (0, 0, 0, self.memory.shape[1]-target_t.shape[0]), mode='constant', value=0)
-                #     # #print("input_t.shape",input_t.shape)
-                #     # if input_t.shape[1]<32:
-                #     #     break
-                #     output_t = self(input_t)  
-                #     loss_t = criterion(output_t, target_t)
-                #     total_loss += loss_t
                 total_loss.backward(retain_graph=True)
                 optimizer.step()
-                #self.clear_memory()
                 scheduler.step(epoch + batch_idx / len(train_loader))
                 train_loss += total_loss.item()
 
@@ -263,20 +215,6 @@ class OnlineTransformer(nn.Module):
                 for inputs, targets in val_loader:
                     output = self(inputs)
                     loss = criterion(output, targets)
-                    # for t in range(inputs.size(0)):  # Iterate over each time step
-                    #     input_t = inputs[t]  
-                    #     target_t = targets[t]  
-                    #     if input_t.shape[0] < self.memory.shape[0]:
-                    #         input_t = torch.nn.functional.pad(input_t, 
-                    #                     (0, 0, 0, self.memory.shape[1] - input_t.shape[0]), mode='constant', value=0)
-                    #         target_t = torch.nn.functional.pad(target_t, 
-                    #                     (0, 0, 0, self.memory.shape[1] - target_t.shape[0]), mode='constant', value=0)
-                    #     if input_t.shape[1] < 32:
-                    #         break
-                    #     output_t = self(input_t)  
-                    #     loss_t = criterion(output_t, target_t)
-                    #     self.clear_memory()
-                    #     total_loss += loss_t.item()
                     val_loss += loss
 
             val_loss /= len(val_loader.dataset)
@@ -347,68 +285,6 @@ class OnlineTransformer(nn.Module):
                     train_loss += total_loss.item()
 
             train_loss /= len(train_loader.dataset)
-        
-    
-# class DiffusionModel(nn.Module):
-#     """
-#     A Diffusion Model for progressively adding and removing noise from data.
-
-#     This model leverages a Transformer-based model to predict noise in the data,
-#     allowing it to reconstruct the original data from a noisy version. The diffusion
-#     process consists of two main stages:
-#     1. Forward Process (q_sample): Gradually adds noise to the data over a series of timesteps.
-#     2. Reverse Process (p_sample): Uses the Transformer model to predict and remove noise,
-#        reconstructing the original data.
-
-#     Attributes:
-#         transformer_model (nn.Module): The Transformer model used to predict noise.
-#         timesteps (int): The number of timesteps in the diffusion process.
-#         betas (torch.Tensor): A tensor of noise coefficients for each timestep.
-#         alphas (torch.Tensor): A tensor of coefficients representing 1 - betas.
-#         alpha_bar (torch.Tensor): A tensor of cumulative products of alphas.
-
-#     Methods:
-#         q_sample(x_0, t, noise): Applies the forward diffusion process to add noise to the data.
-#         p_sample(x_t, t, cond): Applies the reverse diffusion process to remove noise from the data.
-#         forward(x_0, cond): Trains the model by predicting noise for a given timestep.
-#     """
-#     def __init__(self, transformer_model, timesteps=1000, beta_start=0.0001, beta_end=0.02):
-#         super(DiffusionModel, self).__init__()
-#         self.transformer_model = transformer_model
-#         self.timesteps = timesteps
-#         self.betas = torch.linspace(beta_start, beta_end, timesteps)
-#         self.alphas = 1 - self.betas
-#         self.alpha_bar = torch.cumprod(self.alphas, dim=0)
-
-#     def q_sample(self, x_0, t, noise=None):
-#         if noise is None:
-#             noise = torch.randn_like(x_0)
-#         sqrt_alpha_bar_t = torch.sqrt(self.alpha_bar[t])[:, None, None]
-#         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - self.alpha_bar[t])[:, None, None]
-#         return sqrt_alpha_bar_t * x_0 + sqrt_one_minus_alpha_bar_t * noise
-    
-#     def p_sample(self, x_t, t):
-#         noise_pred = self.transformer_model(x_t)
-#         sqrt_alpha_t = torch.sqrt(self.alphas[t])[:, None, None]
-#         sqrt_one_minus_alpha_t = torch.sqrt(1 - self.alphas[t])[:, None, None]
-#         return (x_t - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
-
-#     def forward(self, x_0):
-#         """
-#         Trains the diffusion model by predicting the noise added to the data.
-
-#         Args:
-#             x_0 (torch.Tensor): The clean data with shape (batch_size, seq_len, feature_dim).
-#             cond (torch.Tensor): The conditional sequence with shape (batch_size, seq_len, feature_dim).
-
-#         Returns:
-#             torch.Tensor: The predicted noise with shape (batch_size, seq_len, feature_dim).
-#         """
-#         t = torch.randint(0, self.timesteps, (x_0.shape[0],), device=x_0.device)
-#         noise = torch.randn_like(x_0)
-#         x_t = self.q_sample(x_0, t, noise)
-#         noise_pred = self.transformer_model( x_t)
-#         return noise_pred
 
 
 def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
@@ -452,8 +328,6 @@ def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
     noisy_array = np.concatenate(noisy_segments, axis=1)
     
     return noisy_array, noise_array
-
-
 
 if __name__ == '__main__':
     model = OnlineTransformer(input_dim=45,output_dim=12, d_model=512, nhead=8, 
