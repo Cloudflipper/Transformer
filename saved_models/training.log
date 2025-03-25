@@ -1144,3 +1144,7 @@
 2025-03-25 20:47:54,017 - INFO - Epoch [2/2000], Train Loss: 0.004361, Train Time: 6.29s, Val Loss: 0.011396, Val Time: 0.48s, Total Time: 6.77s
 2025-03-25 20:48:36,373 - INFO - self.d_model:512, self.n_head: 8, self.num_encoder_layers: 7, self.num_decoder_layers: 7,                      self.dim_feedforward: 512, self.dropout: 0.4, self.memory_size: 100
 2025-03-25 20:48:45,263 - INFO - Epoch [1/2000], Train Loss: 0.015247, Train Time: 7.61s, Val Loss: 0.005786, Val Time: 0.03s, Total Time: 7.64s
+2025-03-25 20:49:44,723 - INFO - self.d_model:512, self.n_head: 8, self.num_encoder_layers: 7, self.num_decoder_layers: 7,                      self.dim_feedforward: 512, self.dropout: 0.4, self.memory_size: 100
+2025-03-25 20:49:54,354 - INFO - Epoch [1/2000], Train Loss: 0.017307, Train Time: 8.18s, Val Loss: 0.005861, Val Time: 0.03s, Total Time: 8.21s
+2025-03-25 20:50:56,231 - INFO - self.d_model:512, self.n_head: 8, self.num_encoder_layers: 7, self.num_decoder_layers: 7,                      self.dim_feedforward: 512, self.dropout: 0.4, self.memory_size: 100
+2025-03-25 20:51:05,432 - INFO - Epoch [1/2000], Train Loss: 0.014573, Train Time: 7.95s, Val Loss: 0.006191, Val Time: 0.03s, Total Time: 7.98s

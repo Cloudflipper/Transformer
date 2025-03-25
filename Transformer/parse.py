@@ -51,8 +51,6 @@ def parse_data_for_test(root_dir="saved_data",trajectory=128, omit_velocity=Fals
             obs_with_noise_list.append(obs_with_noise)
     priviledge = np.concatenate(priviledge_list, axis=0)#[:50,:]
     obs_with_noise = np.concatenate(obs_with_noise_list, axis=0)#[:50,:]
-    priviledge = np.concatenate(priviledge_list, axis=0)#[:50,:]
-    obs_with_noise = np.concatenate(obs_with_noise_list, axis=0)#[:50,:]
     print("priviledge shape: ", priviledge.shape)
     print("obs_with_noise shape: ", obs_with_noise.shape)
     priviledge,mean,std=normalize(priviledge)
