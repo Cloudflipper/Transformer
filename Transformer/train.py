@@ -2,7 +2,6 @@ from transformer import OnlineTransformer
 import numpy as np
 from parse import parse_data_for_test
 from torch.nn import DataParallel
-from torch.nn import DataParallel
 
 
 def train():
@@ -23,7 +22,7 @@ def train():
     transformer.save_model('transformer_model')
 
 def eval():
-    priviledge, obs_with_noise = parse_data_for_test()
+    priviledge, obs_with_noise, mean, std = parse_data_for_test()
     transformer = OnlineTransformer(input_dim=45, 
                                     output_dim=49, 
                                     d_model=256, 
