@@ -35,18 +35,6 @@ def eval():
                                     )
     transformer.eval_latest(priviledge,obs_with_noise)
 
-def eval():
-    priviledge, obs_with_noise = parse_data_for_test()
-    transformer = OnlineTransformer(input_dim=45, 
-                                    output_dim=49, 
-                                    d_model=256, 
-                                    num_encoder_layers=5,
-                                    num_decoder_layers=5,
-                                    nhead=8, 
-                                    dropout=0.1,
-                                    batch_size=48,
-                                    )
-    transformer.eval_latest(priviledge,obs_with_noise)
 
 if __name__ == '__main__':
     train()
