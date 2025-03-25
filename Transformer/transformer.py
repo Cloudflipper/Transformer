@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
+from torch.optim import Adam, SGD
 from torch.utils.data import DataLoader, Dataset,TensorDataset
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import os
 import math
 import logging
+import time
 
 class DynamicPositionalEncoding(nn.Module):
     """
@@ -27,13 +29,24 @@ class DynamicPositionalEncoding(nn.Module):
         torch.Size([100, 32, 512])
     """
 
-    def __init__(self, d_model=512):
+    def __init__(self, d_model=512,max_len=5000, device=None):
         """
         Arg:
             d_model (int): The dimensionality of the input embeddings.
         """
         super(DynamicPositionalEncoding, self).__init__()
         self.d_model = d_model
+        self.device = device
+        self.encoding = torch.zeros(max_len, d_model, device=device)
+        self.encoding.requires_grad = False  # 不需要计算梯度
+
+        pos = torch.arange(0, max_len, device=device).float().unsqueeze(dim=1)
+        _2i = torch.arange(0, d_model, step=2, device=device).float()
+
+        # 计算位置编码
+        self.encoding[:, 0::2] = torch.sin(pos / (10000 ** (_2i / d_model)))
+        self.encoding[:, 1::2] = torch.cos(pos / (10000 ** (_2i / d_model)))
+
 
     def forward(self, x):
         """
@@ -44,16 +57,12 @@ class DynamicPositionalEncoding(nn.Module):
         Returns:
             torch.Tensor: The input embeddings with position encodings added. Shape (seq_len, batch_size, d_model).
         """
-        seq_len, batch_size, d_model = x.size()
-        position=torch.arange(seq_len, device=x.device).unsqueeze(1) 
-        div_term = torch.exp(torch.arange(0, d_model, 2, device=x.device).float() * (-math.log(1000.0) / d_model))  
+        #print("x.shape",x.shape)
+        
+        batch_size, seq_len, dim = x.size()
+        #print("self.encoding.shape",self.encoding[:seq_len, :].unsqueeze(0).repeat(batch_size, 1, 1)[0,1,:])
+        return self.encoding[:seq_len, :dim].unsqueeze(0).repeat(batch_size, 1, 1).to(self.device)+x
 
-        pe_sin,pe_cos = torch.sin(position * div_term),torch.cos(position * div_term)  
-        pe = torch.zeros(seq_len, d_model, device=x.device) 
-        pe[:, 0::2] = pe_sin  
-        pe[:, 1::2] = pe_cos  
-
-        return x + pe.unsqueeze(1) 
 
 def he_init(module):
         if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
@@ -85,7 +94,8 @@ class OnlineTransformer(nn.Module):
         memory (torch.Tensor): The memory buffer to store previous input embeddings.
     """
     def __init__(self, input_dim,output_dim,d_model, nhead, num_encoder_layers, num_decoder_layers, 
-                 dim_feedforward=128, dropout=0.1, memory_size=100,batch_size=32, device = "cuda"):
+                 dim_feedforward=128, dropout=0.1, memory_size=100,batch_size=32, device = "cuda:2",
+                 mean = None, std = None):
         super(OnlineTransformer, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -95,14 +105,27 @@ class OnlineTransformer(nn.Module):
         self.dropout = dropout
         self.memory_size = memory_size
         self.input_embedding = nn.Linear(input_dim, d_model)
-        self.positional_encoding = DynamicPositionalEncoding(d_model)
+        self.batch_size = batch_size
+        
+        self.pre_layer = nn.Sequential(
+            nn.Linear(input_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        self.positional_encoding = DynamicPositionalEncoding(d_model,device=device)
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
         decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_decoder_layers)
-        self.output_layer = nn.Linear(d_model, output_dim)
-        self.memory = torch.zeros(memory_size, batch_size, d_model).to(device)
+        self.output_layer = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, output_dim)
+        )
+        self.mean = mean
+        self.std = std
         self.apply(he_init)
+        
 
     
     def forward(self, x):
@@ -113,38 +136,35 @@ class OnlineTransformer(nn.Module):
         Returns:
             torch.Tensor: The reconstructed output with shape (batch_size, input_dim).
         """
-        x = self.input_embedding(x)  # (batch_size, d_model)
-        x = self.positional_encoding(x.unsqueeze(0)).squeeze(0)# (batch_size, d_model)
-
-        self.update_memory(x)
-        input_seq = torch.cat([self.memory, x.unsqueeze(0)], dim=0)  # (memory_size + 1, batch_size, d_model)
-        feature = self.transformer_encoder(input_seq)  # (memory_size + 1, batch_size, d_model)
-        self.feature = feature.clone()
+        #print("x.shape",x.shape)
+        res = self.pre_layer(x)
+        res = self.positional_encoding(res).squeeze(0)# (batch_size, seq_length, d_model)
+        
+        #print("x.shape2",x.shape)
+        
+        #print("x.shape3",x.shape)
+        #input_seq = torch.cat([self.memory, x.unsqueeze(0)], dim=0)  # (memory_size + 1, batch_size, d_model)
+        res = res.permute(1, 0, 2)
+        
+        feature = self.transformer_encoder(res)  # (seq_length, batch_size, d_model)
+        self.feature = torch.cat((feature.permute(1, 0, 2),x),dim=2)
         # if self.diffusion_model is not None:
         #     encoder_output = encoder_output.permute(1, 0, 2)  # (batch_size, memory_size + 1, d_model)
         #     encoder_output = self.diffusion_model(encoder_output) 
         #     encoder_output = encoder_output.permute(1, 0, 2)
-        decoder_output = self.transformer_decoder(feature, feature)  # (memory_size + 1, batch_size, d_model)
-        output = decoder_output[-1, :, :]  # (batch_size, d_model)
-        reconstructed = self.output_layer(output)  # (batch_size, input_dim)
+        decoder_output = self.transformer_decoder(feature, feature)  # (seq_length, batch_size, d_model)
+        #print("decoder_output.shape",decoder_output.shape)
+        reconstructed = self.output_layer(decoder_output)  # (batch_size, input_dim)
+        reconstructed = reconstructed.permute(1, 0, 2)
+        #print("reconstructed.shape",reconstructed.shape)
         return reconstructed
 
-    def update_memory(self, x):
-        """
-        Updates the memory buffer with the new input embedding.
-        Args:
-            x (torch.Tensor): The new input embedding with shape (batch_size, d_model).
-        """
-        x = x.unsqueeze(0)  # (1, batch_size, d_model)
-        # print(self.memory.shape)
-        # print(x.shape)
-        self.memory = torch.cat([self.memory[1:], x], dim=0)  # (memory_size, batch_size, d_model)
         
     def get_feature(self):
         return self.feature
     
-    def train_all(self,priviledge, obs_with_noise,batch_size=32, epochs=10000, 
-              learning_rate=1e-3, validation_split=0.2, save_dir="saved_models"):
+    def train_all(self,priviledge, obs_with_noise,batch_size=32, epochs=10000, trajectory = 128,
+              learning_rate=1e-3, validation_split=0.2, save_dir="saved_models",save_model = True):
         """
         Trains the model using the given training data.
         Args:
@@ -158,12 +178,15 @@ class OnlineTransformer(nn.Module):
         logging.basicConfig(filename=os.path.join(save_dir, 'training.log'),
                             level=logging.INFO,
                             format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.info(f"self.d_model:{self.d_model}, self.n_head: {self.nhead}, self.num_encoder_layers: {self.num_encoder_layers}, self.num_decoder_layers: {self.num_decoder_layers}, \
+                     self.dim_feedforward: {self.dim_feedforward}, self.dropout: {self.dropout}, self.memory_size: {self.memory_size}")
         
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+        self.device = device
         #device = torch.device("cpu")
         self.to(device)
-        priviledge_tensor = torch.tensor(priviledge[:16000], dtype=torch.float32).to(device)
-        obs_with_noise_tensor = torch.tensor(obs_with_noise[:16000], dtype=torch.float32).to(device)
+        priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
+        obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
 
         # Create dataset and data loader
         dataset = TensorDataset(obs_with_noise_tensor, priviledge_tensor)
@@ -177,39 +200,53 @@ class OnlineTransformer(nn.Module):
         # Define optimizer and loss function
         optimizer = Adam(self.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
+        scheduler = CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=10,          
+            T_mult=2,        
+            eta_min=1e-4     
+        )
 
         # Training loop
         for epoch in range(epochs):
+            epoch_start_time = time.time()
             #self.train(priviledge_tensor , obs_with_noise_tensor)
             train_loss = 0.0
-            for inputs, targets in train_loader:
-                #print(inputs.shape)
+            train_start_time = time.time()
+            
+            for batch_idx, (inputs, targets) in enumerate(train_loader):
                 optimizer.zero_grad()
-                outputs = self(inputs)
-                loss = criterion(outputs, targets)
-                loss.backward(retain_graph=True)
+                output_t = self(inputs)  
+                total_loss = criterion(output_t, targets)
+                total_loss.backward(retain_graph=True)
                 optimizer.step()
-                train_loss += loss.item() * inputs.size(0)
+                scheduler.step(epoch + batch_idx / len(train_loader))
+                train_loss += total_loss.item()
 
             train_loss /= len(train_loader.dataset)
-            logging.info(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}")
-            print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.4f}")
+            train_end_time = time.time()
 
             # Validation
             self.eval()
             val_loss = 0.0
+            val_start_time = time.time()
+            
             with torch.no_grad():
                 for inputs, targets in val_loader:
-                    outputs = self(inputs)
-                    loss = criterion(outputs, targets)
-                    val_loss += loss.item() * inputs.size(0)
+                    output = self(inputs)
+                    loss = criterion(output, targets)
+                    val_loss += loss
 
             val_loss /= len(val_loader.dataset)
-            print(f"Epoch [{epoch+1}/{epochs}], Val Loss: {val_loss:.4f}")
-            logging.info(f"Epoch [{epoch+1}/{epochs}], Val Loss: {val_loss:.4f}")
+            val_end_time = time.time()  # 记录验证结束时间
+            epoch_end_time = time.time()
+            logging.info(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.6f}, Train Time: {train_end_time-train_start_time:.2f}s, "
+                         f"Val Loss: {val_loss:.6f}, Val Time: {val_end_time-val_start_time:.2f}s, Total Time: {epoch_end_time-epoch_start_time:.2f}s")
+            print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {train_loss:.6f}, Train Time: {train_end_time-train_start_time:.2f}s, "
+                  f"Val Loss: {val_loss:.6f}, Val Time: {val_end_time-val_start_time:.2f}s, Total Time: {epoch_end_time-epoch_start_time:.2f}s")
             
             #save model every 100 steps
-            if (epoch+1) % 100 == 0:
+            if (epoch+1) % 5 == 0 and save_model is True:
                 checkpoint_path = os.path.join(save_dir, f"model_epoch_{epoch+1}.pth")
                 torch.save({
                     'epoch': epoch + 1,
@@ -220,68 +257,57 @@ class OnlineTransformer(nn.Module):
                 }, checkpoint_path)
                 print(f"Model checkpoint saved to {checkpoint_path}")
                 logging.info(f"Model checkpoint saved to {checkpoint_path}")
+    
+    def eval_latest(self, priviledge, obs_with_noise, batch_size=32, save_dir="saved_models",trajectory=128):
+        model_files = [f for f in os.listdir(save_dir) if f.startswith("model_epoch_") and f.endswith(".pth")]
+        
+        model_files.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        best_model_path = os.path.join(save_dir, model_files[-1])
+        
+        # Load the model
+        checkpoint = torch.load(best_model_path, map_location=torch.device('cpu'))
+        self.load_state_dict(checkpoint['model_state_dict'])
+        epoch = checkpoint['epoch']
+        logging.info(f"Loaded model from epoch {epoch}")
+        print(f"Loaded model from epoch {epoch}")
+        device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+        self.to(device)
+        priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
+        obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
+
+        # Create dataset and data loader
+        dataset = TensorDataset(obs_with_noise_tensor, priviledge_tensor)
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        criterion = nn.MSELoss()
+        torch.set_printoptions(linewidth=1000)
+        with torch.no_grad():
+            for inputs, targets in train_loader:
+                    inputs = inputs.permute(1, 0, 2)  # 调整形状为 (trajectory, batch_size, 49)
+                    targets = targets.permute(1, 0, 2)
+                    total_loss = 0.0
+                    for t in range(trajectory):
+                        input_t = inputs[t]  
+                        target_t = targets[t]  
+                        if input_t.shape[0]<self.memory.shape[0]:
+                            input_t = torch.nn.functional.pad(input_t, 
+                                        (0, 0, 0, self.memory.shape[1]-input_t.shape[0]), mode='constant', value=0)
+                            target_t = torch.nn.functional.pad(target_t, 
+                                        (0, 0, 0, self.memory.shape[1]-target_t.shape[0]), mode='constant', value=0)
+                        #print("input_t.shape",input_t.shape)
+                        if input_t.shape[1]<32:
+                            break
+                        output_t = self(input_t)
+                        print(input_t[0],"\n",output_t[0],"\n",target_t[0])
+                        time.sleep(1)
+                        loss_t = criterion(output_t, target_t)
+                        total_loss += loss_t
+                    self.clear_memory()
+                    train_loss += total_loss.item()
+
+            train_loss /= len(train_loader.dataset)
         
     
-# class DiffusionModel(nn.Module):
-#     """
-#     A Diffusion Model for progressively adding and removing noise from data.
 
-#     This model leverages a Transformer-based model to predict noise in the data,
-#     allowing it to reconstruct the original data from a noisy version. The diffusion
-#     process consists of two main stages:
-#     1. Forward Process (q_sample): Gradually adds noise to the data over a series of timesteps.
-#     2. Reverse Process (p_sample): Uses the Transformer model to predict and remove noise,
-#        reconstructing the original data.
-
-#     Attributes:
-#         transformer_model (nn.Module): The Transformer model used to predict noise.
-#         timesteps (int): The number of timesteps in the diffusion process.
-#         betas (torch.Tensor): A tensor of noise coefficients for each timestep.
-#         alphas (torch.Tensor): A tensor of coefficients representing 1 - betas.
-#         alpha_bar (torch.Tensor): A tensor of cumulative products of alphas.
-
-#     Methods:
-#         q_sample(x_0, t, noise): Applies the forward diffusion process to add noise to the data.
-#         p_sample(x_t, t, cond): Applies the reverse diffusion process to remove noise from the data.
-#         forward(x_0, cond): Trains the model by predicting noise for a given timestep.
-#     """
-#     def __init__(self, transformer_model, timesteps=1000, beta_start=0.0001, beta_end=0.02):
-#         super(DiffusionModel, self).__init__()
-#         self.transformer_model = transformer_model
-#         self.timesteps = timesteps
-#         self.betas = torch.linspace(beta_start, beta_end, timesteps)
-#         self.alphas = 1 - self.betas
-#         self.alpha_bar = torch.cumprod(self.alphas, dim=0)
-
-#     def q_sample(self, x_0, t, noise=None):
-#         if noise is None:
-#             noise = torch.randn_like(x_0)
-#         sqrt_alpha_bar_t = torch.sqrt(self.alpha_bar[t])[:, None, None]
-#         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - self.alpha_bar[t])[:, None, None]
-#         return sqrt_alpha_bar_t * x_0 + sqrt_one_minus_alpha_bar_t * noise
-    
-#     def p_sample(self, x_t, t):
-#         noise_pred = self.transformer_model(x_t)
-#         sqrt_alpha_t = torch.sqrt(self.alphas[t])[:, None, None]
-#         sqrt_one_minus_alpha_t = torch.sqrt(1 - self.alphas[t])[:, None, None]
-#         return (x_t - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
-
-#     def forward(self, x_0):
-#         """
-#         Trains the diffusion model by predicting the noise added to the data.
-
-#         Args:
-#             x_0 (torch.Tensor): The clean data with shape (batch_size, seq_len, feature_dim).
-#             cond (torch.Tensor): The conditional sequence with shape (batch_size, seq_len, feature_dim).
-
-#         Returns:
-#             torch.Tensor: The predicted noise with shape (batch_size, seq_len, feature_dim).
-#         """
-#         t = torch.randint(0, self.timesteps, (x_0.shape[0],), device=x_0.device)
-#         noise = torch.randn_like(x_0)
-#         x_t = self.q_sample(x_0, t, noise)
-#         noise_pred = self.transformer_model( x_t)
-#         return noise_pred
 
 
 def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
@@ -295,7 +321,7 @@ def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
                          The sum of segment_lengths must equal input_size.
         noise_stds: The standard deviation of the noise for each segment.
     Returns:
-        The array with added noise in different segments.
+        The array with added noise in different segments and noise array.
     Examples:
         >>> batch_size = 4
         >>> input_size = 10
@@ -312,17 +338,19 @@ def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
     
     start_idx = 0
     noisy_segments = []
+    noise_segments = []
     for length, noise_std in zip(segment_lengths, noise_stds):
         end_idx = start_idx + length
         segment = input_array[:, start_idx:end_idx]
         noise = np.random.randn(*segment.shape) * noise_std
+        noise_segments.append(noise)
         noisy_segment = segment + noise
         noisy_segments.append(noisy_segment)
         start_idx = end_idx
-    
+    noise_array = np.concatenate(noise_segments, axis=1)
     noisy_array = np.concatenate(noisy_segments, axis=1)
     
-    return noisy_array
+    return noisy_array, noise_array
 
 
 
