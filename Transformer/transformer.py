@@ -2,11 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam, SGD
+from torch.optim import Adam, SGD
 from torch.utils.data import DataLoader, Dataset,TensorDataset
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 import os
 import math
 import logging
+import time
 import time
 
 class DynamicPositionalEncoding(nn.Module):
@@ -30,12 +33,24 @@ class DynamicPositionalEncoding(nn.Module):
     """
 
     def __init__(self, d_model=512,max_len=5000, device=None):
+    def __init__(self, d_model=512,max_len=5000, device=None):
         """
         Arg:
             d_model (int): The dimensionality of the input embeddings.
         """
         super(DynamicPositionalEncoding, self).__init__()
         self.d_model = d_model
+        self.device = device
+        self.encoding = torch.zeros(max_len, d_model, device=device)
+        self.encoding.requires_grad = False  # 不需要计算梯度
+
+        pos = torch.arange(0, max_len, device=device).float().unsqueeze(dim=1)
+        _2i = torch.arange(0, d_model, step=2, device=device).float()
+
+        # 计算位置编码
+        self.encoding[:, 0::2] = torch.sin(pos / (10000 ** (_2i / d_model)))
+        self.encoding[:, 1::2] = torch.cos(pos / (10000 ** (_2i / d_model)))
+
         self.device = device
         self.encoding = torch.zeros(max_len, d_model, device=device)
         self.encoding.requires_grad = False  # 不需要计算梯度
@@ -57,6 +72,12 @@ class DynamicPositionalEncoding(nn.Module):
         Returns:
             torch.Tensor: The input embeddings with position encodings added. Shape (seq_len, batch_size, d_model).
         """
+        #print("x.shape",x.shape)
+        
+        batch_size, seq_len, dim = x.size()
+        #print("self.encoding.shape",self.encoding[:seq_len, :].unsqueeze(0).repeat(batch_size, 1, 1)[0,1,:])
+        return self.encoding[:seq_len, :dim].unsqueeze(0).repeat(batch_size, 1, 1).to(self.device)+x
+
         #print("x.shape",x.shape)
         
         batch_size, seq_len, dim = x.size()
@@ -105,6 +126,14 @@ class OnlineTransformer(nn.Module):
         self.dropout = dropout
         self.memory_size = memory_size
         self.input_embedding = nn.Linear(input_dim, d_model)
+        self.batch_size = batch_size
+        
+        self.pre_layer = nn.Sequential(
+            nn.Linear(input_dim, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+        self.positional_encoding = DynamicPositionalEncoding(d_model,device=device)
         self.batch_size = batch_size
         
         self.pre_layer = nn.Sequential(
@@ -165,6 +194,8 @@ class OnlineTransformer(nn.Module):
     
     def train_all(self,priviledge, obs_with_noise,batch_size=32, epochs=10000, trajectory = 128,
               learning_rate=1e-3, validation_split=0.2, save_dir="saved_models",save_model = True):
+    def train_all(self,priviledge, obs_with_noise,batch_size=32, epochs=10000, trajectory = 128,
+              learning_rate=1e-3, validation_split=0.2, save_dir="saved_models",save_model = True):
         """
         Trains the model using the given training data.
         Args:
@@ -185,6 +216,8 @@ class OnlineTransformer(nn.Module):
         self.device = device
         #device = torch.device("cpu")
         self.to(device)
+        priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
+        obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
         priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
         obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
 
@@ -222,8 +255,11 @@ class OnlineTransformer(nn.Module):
                 optimizer.step()
                 scheduler.step(epoch + batch_idx / len(train_loader))
                 train_loss += total_loss.item()
+                scheduler.step(epoch + batch_idx / len(train_loader))
+                train_loss += total_loss.item()
 
             train_loss /= len(train_loader.dataset)
+            train_end_time = time.time()
             train_end_time = time.time()
 
             # Validation
@@ -231,8 +267,13 @@ class OnlineTransformer(nn.Module):
             val_loss = 0.0
             val_start_time = time.time()
             
+            val_start_time = time.time()
+            
             with torch.no_grad():
                 for inputs, targets in val_loader:
+                    output = self(inputs)
+                    loss = criterion(output, targets)
+                    val_loss += loss
                     output = self(inputs)
                     loss = criterion(output, targets)
                     val_loss += loss
@@ -322,6 +363,7 @@ def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
         noise_stds: The standard deviation of the noise for each segment.
     Returns:
         The array with added noise in different segments and noise array.
+        The array with added noise in different segments and noise array.
     Examples:
         >>> batch_size = 4
         >>> input_size = 10
@@ -339,14 +381,17 @@ def add_segmented_noise_to_tensor(input_array, segment_lengths, noise_stds):
     start_idx = 0
     noisy_segments = []
     noise_segments = []
+    noise_segments = []
     for length, noise_std in zip(segment_lengths, noise_stds):
         end_idx = start_idx + length
         segment = input_array[:, start_idx:end_idx]
         noise = np.random.randn(*segment.shape) * noise_std
         noise_segments.append(noise)
+        noise_segments.append(noise)
         noisy_segment = segment + noise
         noisy_segments.append(noisy_segment)
         start_idx = end_idx
+    noise_array = np.concatenate(noise_segments, axis=1)
     noise_array = np.concatenate(noise_segments, axis=1)
     noisy_array = np.concatenate(noisy_segments, axis=1)
     
