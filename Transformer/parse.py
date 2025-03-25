@@ -30,5 +30,7 @@ def parse_data_for_test(root_dir="saved_data"):
     print("obs_with_noise shape: ", obs_with_noise.shape)
     np.random.shuffle(priviledge)
     np.random.shuffle(obs_with_noise)
+    priviledge = priviledge/(np.max(priviledge, axis=0) - np.min(priviledge, axis=0)) 
+    obs_with_noise = obs_with_noise/(np.max(obs_with_noise, axis=0) - np.min(obs_with_noise, axis=0)) 
     return priviledge, obs_with_noise
             

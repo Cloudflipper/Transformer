@@ -84,7 +84,8 @@ class OnlineTransformer(nn.Module):
         output_layer (nn.Linear): Linear layer to project the Transformer output back to the input dimension.
         memory (torch.Tensor): The memory buffer to store previous input embeddings.
     """
-    def __init__(self, input_dim,output_dim,d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward=128, dropout=0.1, memory_size=100,batch_size=32):
+    def __init__(self, input_dim,output_dim,d_model, nhead, num_encoder_layers, num_decoder_layers, 
+                 dim_feedforward=128, dropout=0.1, memory_size=100,batch_size=32, device = "cuda"):
         super(OnlineTransformer, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -100,7 +101,7 @@ class OnlineTransformer(nn.Module):
         decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_decoder_layers)
         self.output_layer = nn.Linear(d_model, output_dim)
-        self.memory = torch.zeros(memory_size, batch_size, d_model)
+        self.memory = torch.zeros(memory_size, batch_size, d_model).to(device)
         self.apply(he_init)
 
     
@@ -182,7 +183,7 @@ class OnlineTransformer(nn.Module):
             #self.train(priviledge_tensor , obs_with_noise_tensor)
             train_loss = 0.0
             for inputs, targets in train_loader:
-                print(inputs.shape)
+                #print(inputs.shape)
                 optimizer.zero_grad()
                 outputs = self(inputs)
                 loss = criterion(outputs, targets)
