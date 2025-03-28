@@ -29,6 +29,7 @@ def update(self, noised_input, previledge, epoch,
         4. Calculate reconstruction loss
         5. Backpropagate and update weights
 ```
+**Please set the LR to a larger value i.e. 5e-3 to 5e-2, it includes a Cosine Annealing Scheduler**\
 After updating you can get the features of this round by:
 ```
 def get_feature(self, type_index=1):
