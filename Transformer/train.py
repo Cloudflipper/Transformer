@@ -5,7 +5,7 @@ from torch.nn import DataParallel
 
 
 def train():
-    priviledge, obs_with_noise,mean,std = parse_data_for_test(omit_velocity=True)
+    priviledge, obs_with_noise,mean_p,std_p,mean_o,std_o = parse_data_for_test(omit_velocity=True)
     transformer = OnlineTransformer(input_dim=27, 
                                     output_dim=49, 
                                     d_model=512, 
@@ -15,8 +15,7 @@ def train():
                                     dropout=0.4,
                                     batch_size=256,
                                     dim_feedforward=512,
-                                    mean=mean,
-                                    std=std
+                                    sta_param=[mean_p,std_p,mean_o,std_o]
                                     )
     transformer.train_all(priviledge, obs_with_noise,epochs=2000,batch_size=256, learning_rate=1e-2)
     transformer.save_model('transformer_model')

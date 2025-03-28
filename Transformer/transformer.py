@@ -95,8 +95,9 @@ class OnlineTransformer(nn.Module):
     """
     def __init__(self, input_dim,output_dim,d_model, nhead, num_encoder_layers, num_decoder_layers, 
                  dim_feedforward=128, dropout=0.1, memory_size=100,batch_size=32, device = "cuda:2",
-                 mean = None, std = None):
+                 ):
         super(OnlineTransformer, self).__init__()
+        self.device = device
         self.d_model = d_model
         self.nhead = nhead
         self.num_encoder_layers = num_encoder_layers
@@ -122,11 +123,54 @@ class OnlineTransformer(nn.Module):
             nn.ReLU(),
             nn.Linear(d_model, output_dim)
         )
-        self.mean = mean
-        self.std = std
-        self.apply(he_init)
         
-
+        self.memory = torch.zeros((self.batch_size, self.memory_size, d_model)).to(device) # (batch_size, memory_size, d_model)
+        self.l_output = nn.Sequential(nn.Linear(d_model, d_model),
+                                      nn.ReLU(),
+                                      nn.Linear(d_model, 64))
+        self.m_output = nn.Sequential(nn.Linear(d_model, d_model),
+                                      nn.ReLU(),
+                                      nn.Linear(d_model, 64))
+        self.bn_p = nn.BatchNorm1d(49)
+        self.bn_o = nn.BatchNorm1d(49)
+        
+        self.apply(he_init)
+    
+    def normalize_x(self,x):
+        """
+        Normalizes the length parameters using the stored mean and standard deviation. Avg mean and std is updated.
+        Args:
+            x (torch.Tensor): The input tensor to be normalized.
+        Returns:
+            torch.Tensor: The normalized tensor.
+        """
+        a,b,c = x.shape
+        reshaped_tensor = x.view(-1, 49)
+        normalized_tensor = self.bn_p(reshaped_tensor)
+        return normalized_tensor.view(a, b, c)
+    
+    def normalize_noise(self, x):
+        """
+        Normalizes the noises using the stored mean and standard deviation. Avg mean and std is updated.
+        Args:
+            x (torch.Tensor): The input tensor to be normalized.
+        Returns:
+            torch.Tensor: The normalized tensor.
+        """
+        a,b,c = x.shape
+        reshaped_tensor = x.view(-1, 49)
+        normalized_tensor = self.bn_o(reshaped_tensor)
+        return normalized_tensor.view(a, b, c)
+    
+    def de_normalize(self, input, error=0):
+        """
+        De-normalizes the input tensor using the stored mean and standard deviation.
+        Args:
+            x (torch.Tensor): The input tensor to be de-normalized.
+        Returns:
+            torch.Tensor: The de-normalized tensor.
+        """
+        return input* self.bn_p.running_var + self.bn_p.running_mean + error*self.bn_o.running_var + self.bn_o.running_mean
     
     def forward(self, x):
         """
@@ -136,31 +180,38 @@ class OnlineTransformer(nn.Module):
         Returns:
             torch.Tensor: The reconstructed output with shape (batch_size, input_dim).
         """
-        #print("x.shape",x.shape)
         res = self.pre_layer(x)
         res = self.positional_encoding(res).squeeze(0)# (batch_size, seq_length, d_model)
-        
-        #print("x.shape2",x.shape)
-        
-        #print("x.shape3",x.shape)
-        #input_seq = torch.cat([self.memory, x.unsqueeze(0)], dim=0)  # (memory_size + 1, batch_size, d_model)
         res = res.permute(1, 0, 2)
         
         feature = self.transformer_encoder(res)  # (seq_length, batch_size, d_model)
-        self.feature = torch.cat((feature.permute(1, 0, 2),x),dim=2)
-        # if self.diffusion_model is not None:
-        #     encoder_output = encoder_output.permute(1, 0, 2)  # (batch_size, memory_size + 1, d_model)
-        #     encoder_output = self.diffusion_model(encoder_output) 
-        #     encoder_output = encoder_output.permute(1, 0, 2)
+        self.m_feature = torch.cat((feature.permute(1, 0, 2),x),dim=2)
         decoder_output = self.transformer_decoder(feature, feature)  # (seq_length, batch_size, d_model)
-        #print("decoder_output.shape",decoder_output.shape)
-        reconstructed = self.output_layer(decoder_output)  # (batch_size, input_dim)
+        self.last_feature = decoder_output.permute(1, 0, 2)
+        reconstructed = self.output_layer(decoder_output) # (seq_length, batch_size, output_dim)
         reconstructed = reconstructed.permute(1, 0, 2)
-        #print("reconstructed.shape",reconstructed.shape)
+        self.input_estimate = self.de_normalize(reconstructed[-1],x[-1])
+        self.pose_estimate = reconstructed.clone()+x.clone()
         return reconstructed
 
         
-    def get_feature(self):
+    def get_feature(self,type_index = 1):
+        """
+        Returns the feature representation of the input data.
+        Args:
+            type_index (int): The type of feature to return. 
+            0 for reconstructed input, 49 dim, [cap_pos, ten_len, cap_vel, damping, friction],
+            1 for reconstructed input + m feature, (49+64)dim, [cap_pos, ten_len, cap_vel, damping, friction, m_feature].
+            2 for observation + last_feature, (45+64)dim, [cap_pos_noisy, ten_len_noisy, cap_vel_noisy, last_feature].
+        """
+        if type_index == 0:
+            self.feature = self.input_estimate.detach() # (batch_size, output_dim)
+        elif type_index == 1:
+            m_output = self.m_output(self.m_feature.detach())
+            self.feature = torch.cat((self.input_estimate.detach() ,m_output),dim=1)   # (batch_size, output_dim+64)
+        elif type_index == 2:
+            l_output = self.l_output(self.last_feature.detach())
+            self.feature = torch.cat((self.input.detach() ,l_output ),dim=2) # (batch_size, output_dim+64)
         return self.feature
     
     def train_all(self,priviledge, obs_with_noise,batch_size=32, epochs=10000, trajectory = 128,
@@ -172,8 +223,11 @@ class OnlineTransformer(nn.Module):
             obs_with_noise (torch.Tensor): The observed data with noise with shape (batch_size, input_dim).
             batch_size (int): The batch size for training.
             epochs (int): The number of training epochs.
+            trajectory (int): The length of the trajectory for training.
             learning_rate (float): The learning rate for the optimizer.
             validation_split (float): The proportion of the dataset to include in the validation split.
+            save_dir (str): The directory to save the model checkpoints.
+            save_model (bool): Whether to save the model checkpoints.
         """
         logging.basicConfig(filename=os.path.join(save_dir, 'training.log'),
                             level=logging.INFO,
@@ -181,9 +235,7 @@ class OnlineTransformer(nn.Module):
         logging.info(f"self.d_model:{self.d_model}, self.n_head: {self.nhead}, self.num_encoder_layers: {self.num_encoder_layers}, self.num_decoder_layers: {self.num_decoder_layers}, \
                      self.dim_feedforward: {self.dim_feedforward}, self.dropout: {self.dropout}, self.memory_size: {self.memory_size}")
         
-        device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
-        self.device = device
-        #device = torch.device("cpu")
+        device = self.device
         self.to(device)
         priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
         obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
@@ -270,7 +322,7 @@ class OnlineTransformer(nn.Module):
         epoch = checkpoint['epoch']
         logging.info(f"Loaded model from epoch {epoch}")
         print(f"Loaded model from epoch {epoch}")
-        device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+        device = self.device
         self.to(device)
         priviledge_tensor = torch.tensor(priviledge, dtype=torch.float32).to(device)
         obs_with_noise_tensor = torch.tensor(obs_with_noise, dtype=torch.float32).to(device)
@@ -305,7 +357,68 @@ class OnlineTransformer(nn.Module):
                     train_loss += total_loss.item()
 
             train_loss /= len(train_loader.dataset)
+    
+    def update(self, noised_input, previledge,epoch,learning_rate=1e-3,optimizer = None,creiterion = None,scheduler = None):
+        """
+        Updates the memory buffer with the current input data.
+        """
+        if optimizer is None:
+            optimizer = Adam(self.parameters(), lr=learning_rate)
+        if creiterion is None:
+            creiterion = nn.MSELoss()
+        if scheduler is None:
+            scheduler = CosineAnnealingWarmRestarts(
+                optimizer,
+                T_0=10,          
+                T_mult=2,        
+                eta_min=1e-4     
+            )
+        self.memory = torch.cat((self.memory[:,1:], noised_input.unsqueeze(1).to(self.device)), dim=1) # (batch_size, memory_size, d_model)
+        input = self.normalize_x(self.memory)
+        label = torch.stack(self.normalize_noise(previledge[:,:27]),previledge[:,27:]).to(self.device)
+        res = self(input)
+        reconstructed = res[-1]
+        loss = creiterion(reconstructed, label)
+        loss.backward()
+        optimizer.step()
+        scheduler.step(epoch)
+        return reconstructed, loss.item()
+    
+    def clear_memory(self):
+        """
+        Clears the memory buffer by setting it to zeros.
+        """
+        self.memory = torch.zeros((self.memory_size, self.batch_size, self.d_model)).to(self.device)
         
+    def save_model(self, model_name):
+        """
+        Saves the model state to a file.
+        Args:
+            model_name (str): The name of the model file.
+        """
+        checkpoint_path = os.path.join("saved_models", f"{model_name}.pth")
+        torch.save({
+            'model_state_dict': self.state_dict(),
+            'param': self.param
+        }, checkpoint_path)
+        print(f"Model saved to {checkpoint_path}")
+        logging.info(f"Model saved to {checkpoint_path}")
+        return checkpoint_path
+    
+    def load_model(self, model_name):
+        """
+        Loads the model state from a file.
+        Args:
+            model_name (str): The name of the model file.
+        """
+        checkpoint_path = os.path.join("saved_models", f"{model_name}.pth")
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+        self.load_state_dict(checkpoint['model_state_dict'])
+        self.param = checkpoint['param']
+        print(f"Model loaded from {checkpoint_path}")
+        logging.info(f"Model loaded from {checkpoint_path}")
+        return checkpoint_path
+    
     
 
 
