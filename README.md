@@ -1,4 +1,83 @@
+# Transformer
+A PyTorch implementation of an online Transformer model for sequence reconstruction tasks, featuring dynamic positional encoding and memory buffer capabilities.
+To use this model, you can use API
+```
+def update(self, noised_input, previledge, epoch, 
+          learning_rate=1e-3, optimizer=None,
+          criterion=None, scheduler=None):
+    """
+    Performs online update with a single data point
+    
+    Args:
+        noised_input (Tensor): Noisy observation input 
+            Shape: (batch_size, input_dim=27)
+        previledge (Tensor): Privileged information/ground truth
+            Shape: (batch_size, output_dim=49)
+        epoch (int): Current training epoch
+        learning_rate (float): Learning rate if no optimizer provided
+        optimizer (torch.optim): Custom optimizer (default: Adam)
+        criterion (torch.nn): Loss criterion (default: MSELoss)
+        scheduler (torch.optim.lr_scheduler): Learning rate scheduler
+    
+    Returns:
+        Tuple: (reconstructed_output, loss_value)
+    
+    Process:
+        1. Update memory buffer with new input
+        2. Normalize inputs
+        3. Forward pass through model
+        4. Calculate reconstruction loss
+        5. Backpropagate and update weights
+```
+After updating you can get the features of this round by:
+```
+def get_feature(self, type_index=1):
+    """
+    Get feature representations from the model
+    
+    Args:
+        type_index (int): Feature composition mode
+            0: Basic reconstruction (49D)
+            1: Reconstruction + memory features (49+64D)
+            2: Noisy observation + encoder features (45+64D)
+    
+    Returns:
+        Tensor: Feature vector with shape:
+            - (batch_size, 49) for type 0
+            - (batch_size, 113) for type 1
+            - (batch_size, 109) for type 2
+    
+    Feature Composition:
+        Type 0: [cap_pos, ten_len, cap_vel, damping, friction]
+        Type 1: Type 0 + memory features
+        Type 2: Noisy inputs + encoder hidden states
+    """
+```
+### Usage Example
+```
+# Online learning scenario
+for epoch in range(100):
+    for batch in dataloader:
+        noisy, priv = batch
+        
+        # Single update step
+        recon, loss = model.update(
+            noised_input=noisy,
+            previledge=priv,
+            epoch=epoch,
+            learning_rate=1e-4
+        )
+        
+        # Get enhanced features
+        features = model.get_feature(type_index=1)
+        
+        print(f"Epoch {epoch} Loss: {loss:.4f}")
+        print(f"Feature shape: {features.shape}")
+```
+
 # tensegrity-RL
+
+
 A repository for training a tensegrity robot to move using reinforcement learning. The instructions for training a model fron scratch are given below, but for best results you can use the models in the "best_models_pretrained" folder without futher training. To view the results of the pretrained models, use the following commands.
 
 ```
