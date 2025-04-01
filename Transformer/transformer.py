@@ -9,6 +9,99 @@ import math
 import logging
 import time
 
+class AdaptiveBatchNorm1d(nn.BatchNorm1d):
+    def __init__(self, max_features, eps=1e-6, momentum=0.05, affine=True, track_running_stats=True):
+        """
+        Adaptive 1D Batch Normalization supporting dynamic feature dimensions
+        
+        Args:
+            max_features (int): Maximum possible number of features/channels
+            eps (float, optional): Value added to denominator for numerical stability. Default: 1e-5
+            momentum (float, optional): Value used for running mean/var computation. Default: 0.1
+            affine (bool, optional): Whether to learn affine parameters. Default: True
+            track_running_stats (bool, optional): Whether to track running statistics. Default: True
+        """
+        super().__init__(max_features, eps, momentum, affine, track_running_stats)
+        self.max_features = max_features
+
+    def _get_shape_info(self, x):
+        """
+        Reshapes input tensor to 2D and preserves original shape information
+        
+        Args:
+            x (torch.Tensor): Input tensor of any shape with last dimension as features
+            
+        Returns:
+            tuple: (reshaped_tensor (N, num_features), original_shape)
+        """
+        original_shape = x.shape
+        num_features = x.size(-1)
+        x_reshaped = x.reshape(-1, num_features)
+        return x_reshaped, original_shape
+
+    def forward(self, x, current_dim=None):
+        """
+        Forward pass with adaptive feature processing
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape (..., features)
+            current_dim (int, optional): Effective feature dimension for this forward pass.
+                If None, uses previously set dimension. Default: None
+                
+        Returns:
+            torch.Tensor: Normalized tensor with same shape as input
+        """
+        if current_dim is not None:
+            active_dim = current_dim
+        else:
+            active_dim = x[-1].shape[-1]
+
+        x_reshaped, original_shape = self._get_shape_info(x)
+        
+
+        valid_features = x_reshaped[:, :active_dim]
+        mean = valid_features.mean(dim=0)
+        var = valid_features.var(dim=0, unbiased=False)
+            
+        self.running_mean[:active_dim] = (
+                (1 - self.momentum) * self.running_mean[:active_dim] 
+                + self.momentum * mean.detach()
+            )
+        self.running_var[:active_dim] = (
+                (1 - self.momentum) * self.running_var[:active_dim] 
+                + self.momentum * var.detach()
+            )
+
+
+        if active_dim > 0:
+            valid_part = x_reshaped[:, :active_dim]
+            norm_part = (valid_part - mean) / torch.sqrt(var + self.eps)
+            
+            if self.affine:
+                norm_part = norm_part * self.weight[:active_dim] + self.bias[:active_dim]
+
+            if active_dim < self.max_features:
+                remaining = x_reshaped[:, active_dim:]
+                output = torch.cat([norm_part, remaining], dim=1)
+            else:
+                output = norm_part
+        else:
+            output = x_reshaped
+
+        return output.reshape(original_shape)
+
+    def denormalize(self,x):
+        """
+        De-normalizes the input tensor using the stored mean and standard deviation.
+        
+        Args:
+            x (torch.Tensor): The input tensor to be de-normalized.
+            
+        Returns:
+            torch.Tensor: The de-normalized tensor.
+        """
+        return x * self.running_var[:x.shape[-1]] + self.running_mean[:x.shape[-1]]
+    
 class DynamicPositionalEncoding(nn.Module):
     """
     A PyTorch module that dynamically generates positional encoding for sequences of arbitrary length.
@@ -124,17 +217,18 @@ class OnlineTransformer(nn.Module):
             nn.Linear(d_model, output_dim)
         )
         
-        self.memory = torch.zeros((self.batch_size, self.memory_size, d_model)).to(device) # (batch_size, memory_size, d_model)
+        self.memory = torch.zeros((self.batch_size, self.memory_size, input_dim)).to(device) # (batch_size, memory_size, input_dim)
         self.l_output = nn.Sequential(nn.Linear(d_model, d_model),
                                       nn.ReLU(),
                                       nn.Linear(d_model, 64))
         self.m_output = nn.Sequential(nn.Linear(d_model, d_model),
                                       nn.ReLU(),
                                       nn.Linear(d_model, 64))
-        self.bn_p = nn.BatchNorm1d(49)
-        self.bn_o = nn.BatchNorm1d(49)
+        self.bn_p = AdaptiveBatchNorm1d(output_dim)
+        self.bn_o = AdaptiveBatchNorm1d(input_dim)
         
         self.apply(he_init)
+        self.to(device)
     
     def normalize_x(self,x):
         """
@@ -144,10 +238,13 @@ class OnlineTransformer(nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        a,b,c = x.shape
-        reshaped_tensor = x.view(-1, 49)
-        normalized_tensor = self.bn_p(reshaped_tensor)
-        return normalized_tensor.view(a, b, c)
+        try:
+            a,b,c = x.shape
+            reshaped_tensor = x.view(-1, c)
+            normalized_tensor = self.bn_p(reshaped_tensor)
+            return normalized_tensor.view(a, b, c)
+        except:
+            return self.bn_p(x)
     
     def normalize_noise(self, x):
         """
@@ -157,20 +254,14 @@ class OnlineTransformer(nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        a,b,c = x.shape
-        reshaped_tensor = x.view(-1, 49)
-        normalized_tensor = self.bn_o(reshaped_tensor)
-        return normalized_tensor.view(a, b, c)
+        try:
+            a,b,c = x.shape
+            reshaped_tensor = x.view(-1, c)
+            normalized_tensor = self.bn_o(reshaped_tensor)
+            return normalized_tensor.view(a, b, c)
+        except:
+            return self.bn_o(x)
     
-    def de_normalize(self, input, error=0):
-        """
-        De-normalizes the input tensor using the stored mean and standard deviation.
-        Args:
-            x (torch.Tensor): The input tensor to be de-normalized.
-        Returns:
-            torch.Tensor: The de-normalized tensor.
-        """
-        return input* self.bn_p.running_var + self.bn_p.running_mean + error*self.bn_o.running_var + self.bn_o.running_mean
     
     def forward(self, x):
         """
@@ -185,13 +276,12 @@ class OnlineTransformer(nn.Module):
         res = res.permute(1, 0, 2)
         
         feature = self.transformer_encoder(res)  # (seq_length, batch_size, d_model)
-        self.m_feature = torch.cat((feature.permute(1, 0, 2),x),dim=2)
+        self.m_feature = feature[-1]
         decoder_output = self.transformer_decoder(feature, feature)  # (seq_length, batch_size, d_model)
         self.last_feature = decoder_output.permute(1, 0, 2)
         reconstructed = self.output_layer(decoder_output) # (seq_length, batch_size, output_dim)
-        reconstructed = reconstructed.permute(1, 0, 2)
-        self.input_estimate = self.de_normalize(reconstructed[-1],x[-1])
-        self.pose_estimate = reconstructed.clone()+x.clone()
+        res = reconstructed[-1]
+        self.input_estimate = torch.cat((res[...,:27]+ self.bn_o.denormalize(x[:,-1]),res[...,27:]),dim=1) # (batch_size, input_dim)
         return reconstructed
 
         
@@ -208,6 +298,7 @@ class OnlineTransformer(nn.Module):
             self.feature = self.input_estimate.detach() # (batch_size, output_dim)
         elif type_index == 1:
             m_output = self.m_output(self.m_feature.detach())
+            print("m_output.shape",m_output.shape,"self.input_estimate.shape",self.input_estimate.shape)
             self.feature = torch.cat((self.input_estimate.detach() ,m_output),dim=1)   # (batch_size, output_dim+64)
         elif type_index == 2:
             l_output = self.l_output(self.last_feature.detach())
@@ -375,9 +466,9 @@ class OnlineTransformer(nn.Module):
             )
         self.memory = torch.cat((self.memory[:,1:], noised_input.unsqueeze(1).to(self.device)), dim=1) # (batch_size, memory_size, d_model)
         input = self.normalize_x(self.memory)
-        label = torch.stack(self.normalize_noise(previledge[:,:27]),previledge[:,27:]).to(self.device)
+        label = torch.cat((self.normalize_noise(previledge[:,:27].to(self.device)),previledge[:,27:].to(self.device)),dim=1)
         res = self(input)
-        reconstructed = res[-1]
+        reconstructed = res[-1,...]
         loss = creiterion(reconstructed, label)
         loss.backward()
         optimizer.step()
